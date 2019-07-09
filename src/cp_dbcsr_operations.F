@@ -31,7 +31,9 @@ MODULE cp_dbcsr_operations
         dbcsr_distribution_type, dbcsr_distribution_release, &
         dbcsr_norm_frobenius, &
         dbcsr_type_antisymmetric, dbcsr_type_complex_8, dbcsr_type_no_symmetry, dbcsr_type_real_8, &
-        dbcsr_type_symmetric
+        dbcsr_type_symmetric,&
+        dbcsr_iterator_next_block_prv => dbcsr_iterator_next_block
+
    USE cp_fm_basic_linalg,              ONLY: cp_fm_gemm
    USE cp_fm_struct,                    ONLY: cp_fm_struct_create,&
                                               cp_fm_struct_release,&
@@ -64,7 +66,8 @@ MODULE cp_dbcsr_operations
              cp_dbcsr_sm_fm_multiply, cp_dbcsr_plus_fm_fm_t, &
              copy_dbcsr_to_fm_bc, copy_fm_to_dbcsr_bc, cp_fm_to_dbcsr_row_template, &
              cp_dbcsr_m_by_n_from_template, cp_dbcsr_m_by_n_from_row_template, &
-             dbcsr_create_dist_r_unrot
+             dbcsr_create_dist_r_unrot,&
+
 
    ! distribution_2d_type compatibility
    PUBLIC :: cp_dbcsr_dist2d_to_dist
@@ -87,9 +90,94 @@ MODULE cp_dbcsr_operations
 #:endfor
    END INTERFACE
 
+
+   INTERFACE cp_dbcsr_iterator_next_block
+      MODULE PROCEDURE dbcsr_iterator_next_block_index
+      MODULE PROCEDURE dbcsr_iterator_next_2d_block_d, dbcsr_iterator_next_2d_block_s
+      MODULE PROCEDURE dbcsr_iterator_next_2d_block_c, dbcsr_iterator_next_2d_block_z
+      MODULE PROCEDURE dbcsr_iterator_next_1d_block_d, dbcsr_iterator_next_1d_block_s
+      MODULE PROCEDURE dbcsr_iterator_next_1d_block_c, dbcsr_iterator_next_1d_block_z
+   END INTERFACE
+
    PRIVATE
 
 CONTAINS
+
+    ! **************************************************************************************************
+!> \brief Gets the index information of the next block, no data.
+!> \param[in,out] iterator   the iterator
+!> \param[out] row           row of the data block
+!> \param[out] column        column of the data block
+!> \param[out] blk           block number
+!> \param[out] blk_p         (optional) index into block data array
+! **************************************************************************************************
+   SUBROUTINE dbcsr_iterator_next_block_index(iterator, row, column, blk, blk_p)
+      TYPE(dbcsr_iterator_type), INTENT(INOUT)           :: iterator
+      INTEGER, INTENT(OUT)                               :: row, column, blk
+      INTEGER, INTENT(OUT), OPTIONAL                     :: blk_p
+
+      CALL dbcsr_iterator_next_block_prv(iterator%prv, row, column, blk, blk_p=blk_p)
+   END SUBROUTINE dbcsr_iterator_next_block_index
+
+
+
+#:for nametype1, type1 in [('d', 's', 'z', 'c'), ('REAL(kind=real_8)', 'REAL(kind=real_4)', 'COMPLEX(kind=real_8)', 'COMPLEX(kind=real_4)')]
+! **************************************************************************************************
+!> \brief ...
+!> \param iterator ...
+!> \param row ...
+!> \param column ...
+!> \param block ...
+!> \param block_number ...
+!> \param row_size ...
+!> \param col_size ...
+!> \param row_offset ...
+!> \param col_offset ...
+! **************************************************************************************************
+   SUBROUTINE dbcsr_iterator_next_2d_block_${nametype1}$ (iterator, row, column, block, &
+                                                          block_number, &
+                                                          row_size, col_size, row_offset, col_offset)
+      TYPE(dbcsr_iterator_type), INTENT(INOUT) :: iterator
+      INTEGER, INTENT(OUT)                     :: row, column
+      ${type1}$, DIMENSION(:, :), POINTER        :: block
+      LOGICAL                                  :: transposed
+      INTEGER, INTENT(OUT), OPTIONAL           :: block_number, row_size, &
+                                                  col_size, row_offset, &
+                                                  col_offset
+
+      CALL dbcsr_iterator_next_block_prv(iterator%prv, row, column, block, transposed, &
+                                         block_number, row_size, col_size, row_offset, col_offset)
+   END SUBROUTINE dbcsr_iterator_next_2d_block_${nametype1}$
+
+
+   ! **************************************************************************************************
+!> \brief ...
+!> \param iterator ...
+!> \param row ...
+!> \param column ...
+!> \param block ...
+!> \param block_number ...
+!> \param row_size ...
+!> \param col_size ...
+!> \param row_offset ...
+!> \param col_offset ...
+! *************************************************************************************************
+   SUBROUTINE dbcsr_iterator_next_1d_block_${nametype1}$ (iterator, row, column, block, &
+                                                          block_number, &
+                                                          row_size, col_size, row_offset, col_offset)
+      TYPE(dbcsr_iterator_type), INTENT(INOUT)  :: iterator
+      INTEGER, INTENT(OUT)                      :: row, column
+      ${type1}$, DIMENSION(:), POINTER            :: block
+      LOGICAL                                   :: transposed
+      INTEGER, INTENT(OUT), OPTIONAL            :: block_number, row_size, &
+                                                   col_size, row_offset, &
+                                                   col_offset
+
+      CALL dbcsr_iterator_next_block_prv(iterator%prv, row, column, block, &
+                                         transposed, block_number, row_size, col_size, row_offset, col_offset)
+   END SUBROUTINE dbcsr_iterator_next_1d_block_${nametype1}$
+
+#:endfor
 
 #:for fm, type, constr in [("fm", "REAL", "REAL"), ("cfm", "COMPLEX", "CMPLX")]
 
