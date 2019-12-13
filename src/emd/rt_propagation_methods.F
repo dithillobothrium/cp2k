@@ -51,7 +51,7 @@ MODULE rt_propagation_methods
                                               do_pade,&
                                               do_taylor
    USE kinds,                           ONLY: dp
-   USE ls_matrix_exp,                   ONLY: cp_complex_dbcsr_gemm_3
+   USE dbcsr_ls_matrix_exp,                   ONLY: cp_complex_dbcsr_gemm_3
    USE mathlib,                         ONLY: binomial
    USE qs_energy_init,                  ONLY: qs_energies_init
    USE qs_energy_types,                 ONLY: qs_energy_type
