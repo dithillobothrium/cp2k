@@ -705,6 +705,9 @@ CONTAINS
       use_multiple_para_env = .FALSE.
       use_motion_section = .TRUE.
       DO iforce_eval = 1, nforce_eval
+
+         
+         print *,"create force env iter ", iforce_eval
          NULLIFY (force_env_section, my_force_env, subsys_section)
          ! Reference subsys from the first ordered force_eval
          IF (.NOT. multiple_subsys) THEN
@@ -738,6 +741,7 @@ CONTAINS
             IF (method_name_id .EQ. do_embed) THEN
                check = ASSOCIATED(force_env%embed_env%sub_para_env)
                CPASSERT(check)
+               print *, "sindbg: in f77_interface, ngroups for embed, ", force_env%embed_env%ngroups
                ngroups = force_env%embed_env%ngroups
                my_group = lgroup_distribution(para_env%mepos)
                isubforce_eval = iforce_eval - 1
@@ -779,6 +783,7 @@ CONTAINS
                                        use_motion_section=use_motion_section)
 
          CASE (do_qs)
+            print *,"create qs force env"
             CALL qs_env_create(qs_env, globenv)
             CALL qs_init(qs_env, my_para_env, root_section, globenv=globenv, force_env_section=force_env_section, &
                          subsys_section=subsys_section, use_motion_section=use_motion_section)
@@ -830,6 +835,7 @@ CONTAINS
             lgroup_distribution => my_force_env%mixed_env%group_distribution
 
          CASE (do_embed)
+            print *,"create embed force env"
             CALL embed_create_force_env(embed_env, root_section, my_para_env, &
                                         force_env_section=force_env_section, n_subforce_eval=nsubforce_size, &
                                         use_motion_section=use_motion_section)
