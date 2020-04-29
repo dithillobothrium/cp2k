@@ -85,7 +85,7 @@ MODULE force_env_methods
                                               globenv_retain
    USE grrm_utils,                      ONLY: write_grrm
    USE input_constants,                 ONLY: &
-        debug_run, dfet, dmfet, mix_cdft, mix_coupled, mix_generic, mix_linear_combination, &
+        debug_run, dfet, dmfet, nonscf, mix_cdft, mix_coupled, mix_generic, mix_linear_combination, &
         mix_minimum, mix_restrained, mixed_cdft_serial, use_bazant_eip, use_lenosky_eip
    USE input_section_types,             ONLY: section_vals_get_subs_vals,&
                                               section_vals_retain,&
@@ -104,6 +104,7 @@ MODULE force_env_methods
    USE mixed_cdft_methods,              ONLY: mixed_cdft_build_weight,&
                                               mixed_cdft_calculate_coupling,&
                                               mixed_cdft_init
+   USE qs_vxc,                          ONLY: qs_vxc_create
    USE mixed_energy_types,              ONLY: mixed_energy_type,&
                                               mixed_force_type
    USE mixed_environment_types,         ONLY: get_mixed_env,&
@@ -155,6 +156,8 @@ MODULE force_env_methods
                                               qs_env_retain,&
                                               qs_environment_type,&
                                               set_qs_env
+   USE qs_ks_types,                     ONLY: get_ks_env,&
+                                              qs_ks_env_type
    USE qs_force,                        ONLY: qs_calc_energy_force
    USE qs_rho_types,                    ONLY: qs_rho_get,&
                                               qs_rho_type
@@ -169,6 +172,9 @@ MODULE force_env_methods
                                               virial_release,&
                                               virial_type,&
                                               zero_virial
+
+   USE qs_ks_methods,                   only: calc_rho_tot_gspace
+
 #include "./base/base_uses.f90"
 
    IMPLICIT NONE
@@ -1421,6 +1427,8 @@ CONTAINS
       TYPE(section_vals_type), POINTER                   :: embed_section, force_env_section, &
                                                             mapping_section, root_section
 
+      print *, "Embedding"
+
       logger => cp_get_default_logger()
       CPASSERT(ASSOCIATED(force_env))
       ! Get infos about the embedding subsys
@@ -1480,18 +1488,25 @@ CONTAINS
          CALL cp_subsys_get(subsys=subsystems(iforce_eval)%subsys, &
                             particles=particles(iforce_eval)%list)
 
+         
          ! Get Mapping index array
          natom = SIZE(particles(iforce_eval)%list%els)
 
          CALL get_subsys_map_index(mapping_section, natom, iforce_eval, nforce_eval, &
                                    map_index, .TRUE.)
 
+         print *, "MAPPING"
          ! Mapping particles from iforce_eval environment to the embed env
-         DO iparticle = 1, natom
+         DO iparticle = 1, natom            
             jparticle = map_index(iparticle)
+            print *, iparticle, jparticle
+            print *, particles(iforce_eval)%list%els(iparticle)%r
+            print *, particles_embed%els(jparticle)%r
+            print *,"----"
             particles(iforce_eval)%list%els(iparticle)%r = particles_embed%els(jparticle)%r
          END DO
 
+         print *, "force_env calc for " , iforce_eval, " subsystem" 
          ! Calculate energy and forces for each sub_force_env
          CALL force_env_calc_energy_force(force_env%sub_force_env(iforce_eval)%force_env, &
                                           calc_force=.FALSE., &
@@ -1503,6 +1518,7 @@ CONTAINS
             CALL get_qs_env(force_env%sub_force_env(iforce_eval)%force_env%qs_env, dft_control=dft_control)
             IF (dft_control%qs_control%ref_embed_subsys) THEN
                ! Now we can optimize the embedding potential
+               print *, "run embedding potential optimization for ", iforce_eval, " subsystem"
                CALL dft_embedding(force_env, iforce_eval, energies, converged_embed)
                IF (.NOT. converged_embed) CPABORT("Embedding potential optimization not converged.")
             ENDIF
@@ -1511,8 +1527,10 @@ CONTAINS
                CALL get_qs_env(qs_env=force_env%sub_force_env(iforce_eval)%force_env%qs_env, &
                                embed_pot=embed_pot, spin_embed_pot=spin_embed_pot, pw_env=pw_env)
                CALL pw_env_get(pw_env, auxbas_pw_pool=auxbas_pw_pool)
-               CALL pw_pool_give_back_pw(auxbas_pw_pool, embed_pot%pw)
-               CALL pw_release(embed_pot%pw)
+               IF (ASSOCIATED(embed_pot)) THEN
+                  CALL pw_pool_give_back_pw(auxbas_pw_pool, embed_pot%pw)
+                  CALL pw_release(embed_pot%pw)
+               endif
                DEALLOCATE (embed_pot)
                IF (ASSOCIATED(spin_embed_pot)) THEN
                   CALL pw_pool_give_back_pw(auxbas_pw_pool, spin_embed_pot%pw)
@@ -1590,6 +1608,8 @@ CONTAINS
 
       CALL section_vals_val_get(embed_section, "EMBED_METHOD", i_val=embed_method)
       SELECT CASE (embed_method)
+      CASE (nonscf)
+         call nonscf_embedding(force_env, ref_subsys_number, energies)
       CASE (dfet)
          ! Density functional embedding
          CALL dfet_embedding(force_env, ref_subsys_number, energies, converged_embed)
@@ -1599,6 +1619,335 @@ CONTAINS
       END SELECT
 
    END SUBROUTINE dft_embedding
+
+
+! **************************************************************************************************
+!> \brief non-scf calculation of embedding potential acting on subsys from environment
+!> \param force_env ...
+!> \param ref_subsys_number ...
+!> \param energies ...
+! **************************************************************************************************
+   subroutine nonscf_embedding(force_env, ref_subsys_number, energies)
+      TYPE(force_env_type), POINTER                      :: force_env
+      INTEGER                                            :: ref_subsys_number
+      REAL(KIND=dp), DIMENSION(:), POINTER               :: energies
+
+      CHARACTER(len=*), PARAMETER :: routineN = 'nonscf_embedding', routineP = moduleN//':'//routineN
+
+      INTEGER                                            :: handle, ispin, isub, natom, nspins
+      LOGICAL                                            :: use_virial
+      REAL(KIND=dp)                                      :: exc_tot, exc_clust, my_alpha
+      REAL(KIND=dp), DIMENSION(3, 3)                     :: xcvirial
+      !TYPE(dbcsr_p_type), DIMENSION(:), POINTER          :: density_matrix
+      TYPE(dft_control_type), POINTER                    :: dft_control
+      TYPE(pw_env_type), POINTER                         :: pw_env
+      TYPE(pw_p_type), DIMENSION(:), POINTER             :: rho1_g, rho1_r, rho_r, &
+                                                            vxc_rho, vxc_rho_clust, &
+                                                            vxc_tau, vxc_tau_clust
+      TYPE(pw_p_type), DIMENSION(:), POINTER             :: embed_pot, embed_pot_subsys
+      TYPE(pw_p_type),  POINTER                 ::  rho_core, rho_core_clust
+
+      !TYPE(pw_pool_type), POINTER                        :: auxbas_pw_pool
+      !TYPE(qs_ks_env_type), POINTER                      :: ks_env
+      TYPE(qs_rho_type), POINTER                         :: rho, rho_clust, rho_struct
+      !TYPE(virial_type), POINTER                         :: virial
+      TYPE(section_vals_type), POINTER                   :: xc_section
+
+      TYPE(section_vals_type), POINTER         :: input
+      TYPE(qs_ks_env_type),  POINTER            :: ks_env
+      
+      TYPE(pw_env_type), POINTER                         :: pw_env
+      TYPE(pw_p_type)                                    :: rho_tot_gspace, v_hartree_gspace, &
+                                                            rho_tot_rspace, v_hartree_rspace
+      TYPE(pw_poisson_type), POINTER                     :: poisson_env
+      TYPE(pw_pool_type), POINTER                        :: auxbas_pw_pool
+      
+      ! the kinetic NADD is almost the same as in kg_correction.F
+      CALL timeset(routineN, handle)
+
+      NULLIFY (vxc_rho, vxc_tau, vxc_rho_clust, vxc_tau_clust, rho, rho_core, rho_struct, ks_env)
+
+
+      ! TODO in normal way
+      ! in partial test case
+      ! subsys_num = 1 for env 
+      ! subsys_num = 2 for act subsys
+      ! subsys_num = 3 for total (reference system)
+      ! subsys_num = 4 for high level act subsys
+      CALL get_qs_env(qs_env=force_env%sub_force_env(ref_subsys_number)%force_env%qs_env, &
+                      ks_env=ks_env, &
+                      rho=rho, &
+                      rho_core=rho_core,&
+                      natom=natom, &
+                      dft_control=dft_control, &
+                      pw_env=pw_env, &
+                      input=input)
+
+      xc_section => section_vals_get_subs_vals(input, "DFT%XC")
+      
+      print *, "atoms ", natom
+
+      if (associated(rho_core)) then
+        print *, "rho_core"
+      endif
+
+      !if (associated(rho % drho_r)) then
+        !print *, "rho drho_r"
+      !endif
+      
+      !if (associated(rho % tau_r)) then
+        !print *, "rho tau_r"
+      !endif
+
+      CALL qs_vxc_create(ks_env=ks_env, rho_struct=rho, xc_section=xc_section, &
+                         vxc_rho=vxc_rho, vxc_tau=vxc_tau, exc=exc_tot)
+
+     
+      if (associated(vxc_tau)) then
+        print *, "vxc_tau"
+      endif 
+           
+      print *, "exc_tot ",exc_tot          
+      
+      
+      
+      CALL get_qs_env(qs_env=force_env%sub_force_env(ref_subsys_number-1)%force_env%qs_env, &
+                      ks_env=ks_env, &
+                      rho=rho_clust, &
+                      rho_core=rho_core_clust,&
+                      natom=natom, &
+                      dft_control=dft_control, &
+                      pw_env=pw_env, &
+                      input=input)
+      
+
+      xc_section => section_vals_get_subs_vals(input, "DFT%XC")
+
+      CALL qs_vxc_create(ks_env=ks_env, rho_struct=rho_clust, xc_section=xc_section, &
+                         vxc_rho=vxc_rho_clust, vxc_tau=vxc_tau_clust, exc=exc_clust)
+                  
+
+                       
+      if (associated(vxc_tau_clust)) then
+        print *, "vxc_tau_clust"
+      endif 
+
+      print *, "exc_clust ",exc_clust  
+
+
+      ! nadd xc potential
+      DO ispin = 1, nspins
+         vxc_rho(ispin)%pw%cr3d = vxc_rho(ispin)%pw%pw_grid%dvol * &
+             ( vxc_rho(ispin)%pw%cr3d - vxc_rho_clust(ispin)%pw%cr3d)
+
+      enddo
+
+
+
+      ! Prepare plane waves
+      NULLIFY (auxbas_pw_pool)
+
+      ! get variables of environment subsystem
+      CALL get_qs_env(qs_env=force_env%sub_force_env(ref_subsys_number-2)%force_env%qs_env,&
+                      pw_env=pw_env, rho=rho)
+      
+      CALL pw_env_get(pw_env, auxbas_pw_pool=auxbas_pw_pool, &
+                      poisson_env=poisson_env)
+
+      CALL pw_pool_create_pw(auxbas_pw_pool, &
+                             v_hartree_gspace%pw, &
+                             use_data=COMPLEXDATA1D, &
+                             in_space=RECIPROCALSPACE)
+
+      CALL pw_pool_create_pw(auxbas_pw_pool, &
+                             v_hartree_rspace%pw, &
+                             use_data=REALDATA3D, &
+                             in_space=REALSPACE)
+
+      CALL pw_pool_create_pw(auxbas_pw_pool, &
+                             rho_tot_gspase%pw, &
+                             use_data=COMPLEXDATA1D, &
+                             in_space=RECIPROCALSPACE)
+      
+      CALL pw_pool_create_pw(auxbas_pw_pool, &
+                             rho_tot_rspace%pw, &
+                             use_data=REALDATA3D, &
+                             in_space=REALSPACE)
+                             
+      CALL calc_rho_tot_gspace(rho_tot_gspace, qs_env, rho)
+      
+      ! Calculate potential
+      CALL pw_zero(v_hartree_gspace%pw)
+      CALL pw_poisson_solve(poisson_env, rho_tot_gspace%pw, &
+                            vhartree=v_hartree_gspace%pw)
+      
+      CALL pw_zero(v_hartree_rspace%pw)
+      CALL pw_transfer(v_hartree_gspace%pw, v_hartree_rspace%pw)
+
+      dvol = v_resp_rspace%pw%pw_grid%dvol
+      CALL pw_scale(v_hartree_rspace%pw, dvol)
+      
+
+      DO ispin = 1, nspins
+        vxc_rho(ispin)%pw%cr3d = vxc_rho(ispin)%pw%cr3d + v_hartree_rspace%pw%cr3d
+      end do
+
+      CALL pw_transfer(rho_tot_gspace%pw, rho_tot_rspace%pw)
+
+      CALL pw_scale(rho_tot_rspace%pw, dvol)
+
+      print *, "Hartree Env energy", pw_integral_ab(v_hartree_rspace%pw, rho_tot_rspace%pw)
+
+      CALL pw_release(v_hartree_gspace%pw)
+      CALL pw_release(v_hartree_rspace%pw)
+      CALL pw_release(rho_tot_gspace%pw)
+      
+      !normalize_factor = SQRT((eta/pi)**3)
+      !normalize_factor = -2.0_dp
+      !CALL pw_scale(v_resp_rspace%pw, normalize_factor)
+
+      ! Hard copy potential
+      !v_rspace%pw%cr3d(:, :, :) = v_resp_rspace%pw%cr3d(:, :, :)
+                  !nspins = dft_control%nspins
+      !!use_virial = virial%pv_availability .AND. (.NOT. virial%pv_numer)
+      !!use_virial = use_virial .AND. calc_force
+
+      !CALL pw_env_get(pw_env, auxbas_pw_pool=auxbas_pw_pool)
+
+
+      !! get the density matrix
+      !CALL qs_rho_get(old_rho, rho_ao=density_matrix)
+      !! allocate and initialize the density
+      !CALL qs_rho_create(rho_struct)
+      !! set the density matrix to the blocked matrix
+      !CALL qs_rho_set(rho_struct, rho_ao=density_matrix) ! blocked_matrix
+      !CALL qs_rho_rebuild(rho_struct, qs_env, rebuild_ao=.FALSE., rebuild_grids=.TRUE.)
+      !! full density kinetic energy term
+      !CALL qs_rho_update_rho(rho_struct, qs_env)
+      !! get blocked density that has been put on grid
+      !CALL qs_rho_get(rho_struct, rho_r=rho_r)
+
+      !! If external density associated then it is needed either for
+      !! 1) folding of second derivative while partially integrating, or
+      !! 2) integration of response forces
+      !!NULLIFY (rho1, rho1_r, rho1_g)
+      !!IF (PRESENT(pmat_ext)) THEN
+         !!CALL qs_rho_create(rho1)
+         !!CALL qs_rho_set(rho1, rho_ao=pmat_ext)
+         !!CALL qs_rho_rebuild(rho1, qs_env, rebuild_ao=.FALSE., rebuild_grids=.TRUE.)
+         !!CALL qs_rho_update_rho(rho1, qs_env)
+         !!CALL qs_rho_get(rho1, rho_r=rho1_r, rho_g=rho1_g)
+      !!END IF
+
+      !! Response solver requires factor (spin) for kernel matrix
+      !! alpha = 2 closed-shell
+      !! alpha = 1 open-shell
+      !my_alpha = 1.0_dp
+      !IF (PRESENT(alpha)) my_alpha = alpha
+
+      !ekin_imol = 0.0_dp
+
+      !! calculate xc potential or kernel
+      !!IF (do_kernel) THEN
+         !!! derivation wrt to rho_struct and evaluation at rho_struct
+         !!CALL create_kernel(qs_env, &
+                            !!vxc=vxc_rho, &
+                            !!rho=rho_struct, &
+                            !!rho1=rho1, &
+                            !!xc_section=kg_env%xc_section_kg)
+      !!ELSE
+         !IF (ASSOCIATED(vxc_tau)) THEN
+            !CPABORT(" KG with meta-kinetic energy functionals not implemented")
+         !END IF
+      !!END IF
+
+      !DO ispin = 1, nspins
+         !vxc_rho(ispin)%pw%cr3d = my_alpha*vxc_rho(ispin)%pw%cr3d*vxc_rho(ispin)%pw%pw_grid%dvol
+         !! Integrate xc-potential with external density for outer response forces
+         !IF (PRESENT(pmat_ext) .AND. .NOT. do_kernel) THEN
+            !CALL qs_rho_get(rho1, rho_ao=density_matrix)
+         !END IF
+         !CALL integrate_v_rspace(v_rspace=vxc_rho(ispin), &
+                                 !pmat=density_matrix(ispin), hmat=ks_matrix(ispin), &
+                                 !qs_env=qs_env, calculate_forces=calc_force)
+         !CALL pw_pool_give_back_pw(auxbas_pw_pool, vxc_rho(ispin)%pw)
+      !END DO
+      !DEALLOCATE (vxc_rho)
+      !ekin_mol = -ekin_imol
+      !!xcvirial(1:3, 1:3) = 0.0_dp
+      !!IF (use_virial) xcvirial(1:3, 1:3) = xcvirial(1:3, 1:3) - virial%pv_xc(1:3, 1:3)
+
+      !! loop over all subsets
+      !DO isub = 1, kg_env%nsubsets
+         !! calculate the densities for the given blocked density matrix - pass the subset task_list
+         !CALL qs_rho_update_rho(rho_struct, qs_env, &
+                                !task_list_external=kg_env%subset(isub)%task_list)
+         !! Same for external (response) density if present
+         !IF (PRESENT(pmat_ext)) THEN
+            !CALL qs_rho_update_rho(rho1, qs_env, &
+                                   !task_list_external=kg_env%subset(isub)%task_list)
+         !END IF
+
+         !ekin_imol = 0.0_dp
+         !! calc Hohenberg-Kohn kin. energy of the density corresp. to the remaining molecular block(s)
+         !! info per block in rho_struct now
+
+         !! calculate kernel
+         !!IF (do_kernel) THEN
+            !!CALL create_kernel(qs_env, &
+                               !!vxc=vxc_rho, &
+                               !!rho=rho_struct, &
+                               !!rho1=rho1, &
+                               !!xc_section=kg_env%xc_section_kg)
+         !!ELSE
+            !CALL qs_vxc_create(ks_env=ks_env, &
+                               !rho_struct=rho_struct, &
+                               !xc_section=kg_env%xc_section_kg, &
+                               !vxc_rho=vxc_rho, &
+                               !vxc_tau=vxc_tau, &
+                               !exc=ekin_imol)
+         !!END IF
+
+         !ekin_mol = ekin_mol + ekin_imol
+
+         !DO ispin = 1, nspins
+            !vxc_rho(ispin)%pw%cr3d = -my_alpha*vxc_rho(ispin)%pw%cr3d*vxc_rho(ispin)%pw%pw_grid%dvol
+            !! Integrate with response density for outer response forces
+            !IF (PRESENT(pmat_ext) .AND. .NOT. do_kernel) THEN
+               !CALL qs_rho_get(rho1, rho_ao=density_matrix)
+            !END IF
+            !CALL integrate_v_rspace(v_rspace=vxc_rho(ispin), &
+                                    !pmat=density_matrix(ispin), &
+                                    !hmat=ks_matrix(ispin), &
+                                    !qs_env=qs_env, &
+                                    !calculate_forces=calc_force, &
+                                    !task_list_external=kg_env%subset(isub)%task_list)
+            !! clean up vxc_rho
+            !CALL pw_pool_give_back_pw(auxbas_pw_pool, vxc_rho(ispin)%pw)
+         !END DO
+         !DEALLOCATE (vxc_rho)
+
+         !!IF (use_virial) THEN
+            !!xcvirial(1:3, 1:3) = xcvirial(1:3, 1:3) + virial%pv_xc(1:3, 1:3)
+         !!END IF
+
+      !END DO
+
+      !!IF (use_virial) THEN
+         !!virial%pv_xc(1:3, 1:3) = xcvirial(1:3, 1:3)
+      !!END IF
+
+      !! clean up rho_struct
+      !CALL qs_rho_set(rho_struct, rho_ao=Null())
+      !CALL qs_rho_release(rho_struct)
+      !IF (PRESENT(pmat_ext)) THEN
+         !CALL qs_rho_set(rho1, rho_ao_kp=Null())
+         !CALL qs_rho_release(rho1)
+      !END IF
+
+      CALL timestop(handle)
+   end subroutine nonscf_embedding
+
 ! **************************************************************************************************
 !> \brief ... Main driver for DFT embedding
 !> \param force_env ...
@@ -1713,6 +2062,7 @@ CONTAINS
       ENDIF
 
       DO i_force_eval = 1, ref_subsys_number - 1
+         
          NULLIFY (subsys_rho, rho_r_subsys, dft_control)
          CALL get_qs_env(force_env%sub_force_env(i_force_eval)%force_env%qs_env, rho=subsys_rho, energy=energy, &
                          dft_control=dft_control)
@@ -1779,6 +2129,8 @@ CONTAINS
 
       ! Calculate subsystems with trial embedding potential
       DO i_iter = 1, opt_embed%n_iter
+         print *, "internal optimization iter ", i_iter 
+
          opt_embed%i_iter = i_iter
 
          ! Set the density difference as the negative reference one
@@ -1904,6 +2256,8 @@ CONTAINS
          ! Finally, add the regularization term
          opt_embed%w_func(i_iter) = opt_embed%w_func(i_iter) + opt_embed%reg_term
 
+         print *, "W_func ", opt_embed%w_func(i_iter)
+         
          ! Print information and check convergence
          CALL print_emb_opt_info(output_unit, i_iter, opt_embed)
          CALL conv_check_embed(opt_embed, diff_rho_r, diff_rho_spin, output_unit)
