@@ -1148,4 +1148,9 @@ MODULE input_constants
    INTEGER, PARAMETER, PUBLIC               :: gto_cartesian = 1, &
                                                gto_spherical = 2
 
+
+
+                                           
+   INTEGER, PARAMETER, PUBLIC               :: kinetic_orbital = 0, &
+                                               kinetic_functional = 1
 END MODULE input_constants

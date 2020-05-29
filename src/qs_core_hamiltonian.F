@@ -95,7 +95,7 @@ MODULE qs_core_hamiltonian
    USE dbcsr_api,                       ONLY: &
         dbcsr_add, dbcsr_copy, dbcsr_create, dbcsr_distribution_type, dbcsr_iterator_blocks_left, &
         dbcsr_iterator_next_block, dbcsr_iterator_start, dbcsr_iterator_stop, dbcsr_iterator_type, &
-        dbcsr_p_type, dbcsr_type
+        dbcsr_p_type, dbcsr_type, dbcsr_clear
    USE input_constants,                 ONLY: do_admm_purify_none,&
                                               do_ppl_analytic,&
                                               kg_tnadd_atomic,&
@@ -126,10 +126,24 @@ MODULE qs_core_hamiltonian
                                               create_oce_set,&
                                               oce_matrix_type
    USE qs_overlap,                      ONLY: build_overlap_matrix
+
    USE qs_rho_types,                    ONLY: qs_rho_get,&
                                               qs_rho_type
    USE virial_types,                    ONLY: virial_type
+   USE input_section_types,             ONLY: section_vals_get_subs_vals,&
+                                              section_vals_retain,&
+                                              section_vals_type,&
+                                              section_vals_val_get
+   USE pw_types,                        ONLY: REALDATA3D,&
+                                              REALSPACE,&
+                                              pw_p_type,&
+                                              pw_release
+
+   USE qs_vxc,                          ONLY: qs_vxc_create
+
+   
 #include "./base/base_uses.f90"
+
 
    IMPLICIT NONE
 
@@ -184,7 +198,14 @@ CONTAINS
       TYPE(qs_ks_env_type), POINTER                      :: ks_env
       TYPE(qs_rho_type), POINTER                         :: rho
       TYPE(virial_type), POINTER                         :: virial
-
+      TYPE(section_vals_type), POINTER                   :: kin_func_section
+      TYPE(section_vals_type), POINTER                   :: input
+      integer  :: kinetic_op, ispin, nspins
+      TYPE(pw_p_type), DIMENSION(:), POINTER             ::  vkin_rho, &
+                                                            vkin_tau
+      REAL(KIND=dp)                                      :: ekin
+      TYPE(dbcsr_p_type), DIMENSION(:), POINTER          :: density_matrix
+     
       IF (calculate_forces) THEN
          CALL timeset(routineN//"_forces", handle)
       ELSE
@@ -280,13 +301,17 @@ CONTAINS
                                    sab_nl=sab_orb, calculate_forces=.TRUE., &
                                    matrixkp_p=matrix_w)
          ! T matrix
-         IF (.NOT. ofdft) &
+         IF (.NOT. ofdft) then
             CALL build_kinetic_matrix(ks_env, matrixkp_t=matrix_t, &
                                       matrix_name="KINETIC ENERGY MATRIX", &
                                       basis_type="ORB", &
                                       sab_nl=sab_orb, calculate_forces=.TRUE., &
                                       matrixkp_p=matrix_p, &
                                       eps_filter=eps_filter)
+         
+         
+
+         endif
          ! *** If LSD, then recover alpha density and beta density     ***
          ! *** from the total density (1) and the spin density (2)     ***
          ! *** The W matrix is neglected, since it will be destroyed   ***
@@ -307,12 +332,57 @@ CONTAINS
                                    basis_type_b="ORB", &
                                    sab_nl=sab_orb)
          ! T matrix
-         IF (.NOT. ofdft) &
-            CALL build_kinetic_matrix(ks_env, matrixkp_t=matrix_t, &
-                                      matrix_name="KINETIC ENERGY MATRIX", &
-                                      basis_type="ORB", &
-                                      sab_nl=sab_orb, &
-                                      eps_filter=eps_filter)
+         IF (.NOT. ofdft) then
+
+             
+             CALL get_qs_env(qs_env=qs_env, &
+                      ks_env=ks_env, &
+                      rho=rho, &
+                      input=input,&
+                  dft_control=dft_control)
+             
+            CALL section_vals_val_get(input, "DFT%KINETIC_OPERATOR", i_val=kinetic_op)
+               print *, "Nimag ", dft_control % nimages
+           
+                CALL build_kinetic_matrix(ks_env, matrixkp_t=matrix_t, &
+                                         matrix_name="KINETIC ENERGY MATRIX", &
+                                         basis_type="ORB", &
+                                         sab_nl=sab_orb, &
+                                         eps_filter=eps_filter)
+            
+            if (kinetic_op == 0 .or. dft_control % nimages > 1) then
+                print *,"KINETIC ORBITAL" 
+                !CALL build_kinetic_matrix(ks_env, matrixkp_t=matrix_t, &
+                                         !matrix_name="KINETIC ENERGY MATRIX", &
+                                         !basis_type="ORB", &
+                                         !sab_nl=sab_orb, &
+                                         !eps_filter=eps_filter)
+            else
+               call dbcsr_clear(matrix_t(1,1)%matrix)
+
+                print *,"KINETIC FUNC" 
+               !kin_func_section => section_vals_get_subs_vals(input, "DFT%KG_METHOD%XC")
+
+               !CALL qs_vxc_create(ks_env=ks_env, rho_struct=rho, xc_section=kin_func_section, &
+                            !vxc_rho=vkin_rho, vxc_tau=vkin_tau, exc=ekin)
+               
+               !CALL qs_rho_get(rho, rho_ao=density_matrix)
+
+
+               
+               !DO ispin = 1, dft_control%nspins
+                  !! in KG my_alpha is added , why??
+                  !vkin_rho(ispin)%pw%cr3d = vkin_rho(ispin)%pw%cr3d*vkin_rho(ispin)%pw%pw_grid%dvol
+                  !! Integrate xc-potential with external density for outer response forces
+                  !CALL integrate_v_rspace(v_rspace=vkin_rho(ispin), &
+                                 !pmat=density_matrix(ispin), hmat=ks_matrix(ispin), &
+                                 !qs_env=qs_env)
+
+                  !CALL pw_release(vkin_rho(ispin)%pw)
+                  !!CALL pw_pool_give_back_pw(auxbas_pw_pool, vkin_rho(ispin)%pw)
+               !END DO
+            endif 
+         endif
       END IF
 
       ! ADMM

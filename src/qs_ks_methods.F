@@ -148,6 +148,8 @@ MODULE qs_ks_methods
    USE surface_dipole,                  ONLY: calc_dipsurf_potential
    USE virial_types,                    ONLY: virial_type
    USE xtb_matrices,                    ONLY: build_xtb_ks_matrix
+   use ke_functional,                   only: add_ke_func_contribution
+
 #include "./base/base_uses.f90"
 
    IMPLICIT NONE
@@ -219,7 +221,7 @@ CONTAINS
       LOGICAL :: do_adiabatic_rescaling, do_ddapc, do_hfx, do_ppl, gapw, gapw_xc, &
          hfx_treat_lsd_in_core, just_energy_xc, lrigpw, my_print, rigpw, use_virial
       REAL(KIND=dp)                                      :: ecore_ppl, edisp, ee_ener, ekin_mol, &
-                                                            mulliken_order_p
+                                                            mulliken_order_p, ekin
       REAL(KIND=dp), DIMENSION(3, 3)                     :: h_stress, pv_loc
       TYPE(admm_type), POINTER                           :: admm_env
       TYPE(cdft_control_type), POINTER                   :: cdft_control
@@ -601,6 +603,7 @@ CONTAINS
             energy%embed_corr = 0.0_dp
             CALL get_embed_potential_energy(qs_env, rho, v_rspace_embed, dft_control, &
                                             energy%embed_corr, just_energy)
+            print *,"embed energy ", energy%embed_corr
          ENDIF
          ! Everything else
          CALL qs_vxc_create(ks_env=ks_env, rho_struct=rho_struct, xc_section=xc_section, &
@@ -654,6 +657,7 @@ CONTAINS
             IF (dft_control%do_admm) CALL integrate_rho_nlcc(v_rspace_new_aux_fit(ispin), qs_env)
          END DO
       ENDIF
+
 
       ! calculate KG correction
       IF (dft_control%qs_control%do_kg .AND. just_energy) THEN
@@ -722,6 +726,12 @@ CONTAINS
                virial%pv_xc = 0.0_dp
             END IF
          END IF
+   
+         ! kin energy functional (check for existence inside)
+         ksmat => ks_matrix(:, 1)
+         call add_ke_func_contribution(qs_env, ksmat, ekin)
+      
+         energy%exc = energy%exc + ekin
 
       END IF ! .NOT. just energy
 

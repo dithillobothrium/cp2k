@@ -98,7 +98,7 @@ MODULE input_cp2k_dft
         xas_2s_type, xas_3d_type, xas_3p_type, xas_3s_type, xas_4d_type, xas_4f_type, xas_4p_type, &
         xas_4s_type, xas_dip_len, xas_dip_vel, xas_dscf, xas_none, xas_not_excited, &
         xas_tdp_by_index, xas_tdp_by_kind, xas_tp_fh, xas_tp_flex, xas_tp_hh, xas_tp_xfh, &
-        xas_tp_xhh, xes_tp_val
+        xas_tp_xhh, xes_tp_val, kinetic_orbital, kinetic_functional
    USE input_cp2k_almo,                 ONLY: create_almo_scf_section
    USE input_cp2k_distribution,         ONLY: create_distribution_section
    USE input_cp2k_ec,                   ONLY: create_ec_section
@@ -144,6 +144,11 @@ MODULE input_cp2k_dft
    USE qs_mom_types,                    ONLY: create_mom_section
    USE string_utilities,                ONLY: newline,&
                                               s2a
+
+   USE input_section_types,             ONLY: section_vals_get_subs_vals,&
+                                              section_vals_retain,&
+                                              section_vals_type,&
+                                              section_vals_val_get
 #include "./base/base_uses.f90"
 
    IMPLICIT NONE
@@ -376,6 +381,20 @@ CONTAINS
       CALL section_add_keyword(section, keyword)
       CALL keyword_release(keyword)
 
+      CALL keyword_create(keyword, __LOCATION__, &
+                          name="KINETIC_OPERATOR", &
+                          description="Calculate kinetic operator based using orbitals or functional", &
+                          enum_c_vals=s2a("ORBITAL", "FUNCTIONAL"), &
+                          enum_i_vals=(/kinetic_orbital, kinetic_functional/), &
+                          enum_desc=s2a("Calculate kinetic operator as derivative of orbitals and &
+                                        &overlap between them ",&
+                                        "calculate kinetic operator using kinetic functional specified &
+                                        &in KG_METHOD%XC section building the kinetic potential"), &
+                          default_i_val=kinetic_orbital, &
+                          usage="KINETIC_OPERATOR ORBITAL")
+      CALL section_add_keyword(section, keyword)
+      CALL keyword_release(keyword)
+      
       NULLIFY (subsection)
       CALL create_scf_section(subsection)
       CALL section_add_subsection(section, subsection)

@@ -231,6 +231,7 @@ CONTAINS
             CPABORT(" KG with meta-kinetic energy functionals not implemented")
          END IF
       END IF
+         print *, "Full KG KE", ekin_imol
 
       DO ispin = 1, nspins
          vxc_rho(ispin)%pw%cr3d = my_alpha*vxc_rho(ispin)%pw%cr3d*vxc_rho(ispin)%pw%pw_grid%dvol
@@ -280,6 +281,7 @@ CONTAINS
          END IF
 
          ekin_mol = ekin_mol + ekin_imol
+         print *, "subsys", isub, " KG KE", ekin_imol
 
          DO ispin = 1, nspins
             vxc_rho(ispin)%pw%cr3d = -my_alpha*vxc_rho(ispin)%pw%cr3d*vxc_rho(ispin)%pw%pw_grid%dvol
@@ -411,6 +413,8 @@ CONTAINS
       ekin_imol = 0.0_dp
       CALL qs_vxc_create(ks_env=ks_env, rho_struct=rho_struct, xc_section=kg_env%xc_section_kg, &
                          vxc_rho=vxc_rho, vxc_tau=vxc_tau, exc=ekin_imol)
+
+      print *, "full KG KE", ekin_imol
       IF (ASSOCIATED(vxc_tau)) THEN
          CPABORT(" KG with meta-kinetic energy functionals not implemented")
       END IF
@@ -440,7 +444,8 @@ CONTAINS
          CALL qs_vxc_create(ks_env=ks_env, rho_struct=rho_struct, xc_section=kg_env%xc_section_kg, &
                             vxc_rho=vxc_rho, vxc_tau=vxc_tau, exc=ekin_imol)
          ekin_mol = ekin_mol + ekin_imol
-
+         
+         print *, "subsys", isub, " KG KE", ekin_imol
          DO ispin = 1, nspins
             vxc_rho(ispin)%pw%cr3d = -vxc_rho(ispin)%pw%cr3d*vxc_rho(ispin)%pw%pw_grid%dvol
             lri_v_int => lri_density%lri_coefs(ispin)%lri_kinds
