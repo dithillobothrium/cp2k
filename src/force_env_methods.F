@@ -210,6 +210,8 @@ MODULE force_env_methods
    USE pw_methods,                      ONLY: pw_axpy,&
                                               pw_copy
 
+   USE qs_neighbor_list_types,          ONLY: neighbor_list_set_p_type,&
+                                              release_neighbor_list_sets
 #include "./base/base_uses.f90"
 
    IMPLICIT NONE
@@ -2324,14 +2326,11 @@ CONTAINS
       ALLOCATE (subset_of_mol(nsubsets))
       ALLOCATE (subset(nsubsets))
 
-      !DO i = 1, nsubsets
-            !subset_of_mol(i) = i
-            !NULLIFY (subset(i)%sab_orb)
-            !NULLIFY (subset(i)%task_list)
-      !END DO
-
       DO isubset = 1, nsubsets
          subset_of_mol(isubset) = isubset
+      enddo
+
+      do isubset = 1, nsubsets
          NULLIFY (subset(isubset)%sab_orb)
          NULLIFY (subset(isubset)%task_list)
          
@@ -2339,7 +2338,7 @@ CONTAINS
          CALL kg_build_neighborlist(force_env%sub_force_env(ref_subsys_number)%force_env%qs_env,&
                                      sab_orb=subset(isubset)%sab_orb, molecular=.TRUE., &
                                        subset_of_mol=subset_of_mol, current_subset=isubset)
-        
+                                    
          CALL allocate_task_list(subset(isubset)%task_list)
          
          ! generate the subset task list from the neighborlist
@@ -2347,9 +2346,23 @@ CONTAINS
                                     reorder_rs_grid_ranks=.FALSE., soft_valid=.false., &
                                     skip_load_balance_distributed=dft_control%qs_control%skip_load_balance_distributed, &
                                     sab_orb_external=subset(isubset)%sab_orb)
-      END DO
+      ENDDO
 
 
+      !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+      CALL qs_rho_get(rho, rho_ao=density_matrix)
+     
+      NULLIFY(rho_clust) 
+      ! allocate and initialize the density
+      CALL qs_rho_create(rho_clust)
+      
+      ! set the density matrix to the blocked matrix
+      CALL qs_rho_set(rho_clust, rho_ao=density_matrix) ! blocked_matrix
+      
+      CALL qs_rho_rebuild(rho_clust, force_env%sub_force_env(ref_subsys_number)%force_env%qs_env,&
+          rebuild_ao=.FALSE., rebuild_grids=.TRUE.)
+      
+      CALL qs_rho_update_rho(rho_clust, force_env%sub_force_env(ref_subsys_number)%force_env%qs_env)
       !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
       xc_section => section_vals_get_subs_vals(input, "DFT%XC")
@@ -2370,11 +2383,11 @@ CONTAINS
         !print *, "rho tau_r"
       !endif
 
-      CALL qs_vxc_create(ks_env=ks_env, rho_struct=rho, xc_section=xc_section, &
+      CALL qs_vxc_create(ks_env=ks_env, rho_struct=rho_clust, xc_section=xc_section, &
                          vxc_rho=vxc_rho, vxc_tau=vxc_tau, exc=exc_tot)
 
       print *,"get kin full system pot"
-      CALL qs_vxc_create(ks_env=ks_env, rho_struct=rho, xc_section=kin_func_section, &
+      CALL qs_vxc_create(ks_env=ks_env, rho_struct=rho_clust, xc_section=kin_func_section, &
                             vxc_rho=vkin_rho, vxc_tau=vkin_tau, exc=ekin)
      
       if (associated(vxc_tau)) then
@@ -2417,7 +2430,7 @@ CONTAINS
                              in_space=REALSPACE)
                              
       CALL calc_rho_tot_gspace(rho_tot_gspace, &
-          force_env%sub_force_env(ref_subsys_number)%force_env%qs_env, rho)
+          force_env%sub_force_env(ref_subsys_number)%force_env%qs_env, rho_clust)
       
 
       ! Calculate potential
@@ -2435,7 +2448,7 @@ CONTAINS
       
       
       
-      CALL qs_rho_get(rho, rho_r=rho1_r)
+      CALL qs_rho_get(rho_clust, rho_r=rho1_r)
       
       open (unit = 666, file = "rho_full.cube")
         
@@ -2452,17 +2465,6 @@ CONTAINS
       
       !!!!!!!!!!!!!!! CLUSTER XC and Kin potentials !!!!!!!!!!!!!!!!!!!!
       
-      CALL qs_rho_get(rho, rho_ao=density_matrix)
-     
-      NULLIFY(rho_clust) 
-      ! allocate and initialize the density
-      CALL qs_rho_create(rho_clust)
-      
-      ! set the density matrix to the blocked matrix
-      CALL qs_rho_set(rho_clust, rho_ao=density_matrix) ! blocked_matrix
-      
-      CALL qs_rho_rebuild(rho_clust, force_env%sub_force_env(ref_subsys_number)%force_env%qs_env,&
-          rebuild_ao=.FALSE., rebuild_grids=.TRUE.)
       
       CALL qs_rho_update_rho(rho_clust, force_env%sub_force_env(ref_subsys_number)%force_env%qs_env, &
                        task_list_external=subset(2)%task_list)
@@ -2729,7 +2731,12 @@ CONTAINS
 
       DO isubset = 1, nsubsets
          CALL deallocate_task_list(subset(isubset)%task_list)
+         CALL release_neighbor_list_sets(subset(isubset) % sab_orb)
       end do
+
+      DEALLOCATE (subset_of_mol)
+      DEALLOCATE (subset)
+
 
       CALL timestop(handle)
    end subroutine nonscf_embedding2

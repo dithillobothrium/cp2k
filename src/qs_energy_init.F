@@ -193,7 +193,18 @@ CONTAINS
             ALLOCATE (kg_env%subset_of_mol(SIZE(molecule_set)))
          END IF
          !
-         CALL kg_build_subsets(kg_env, para_env)
+         !CALL kg_build_subsets(kg_env, para_env)
+         !
+         kg_env%nsubsets = SIZE(molecule_set)
+         ALLOCATE (kg_env%subset(kg_env%nsubsets))
+
+         print *,kg_env%nsubsets
+         DO isubset = 1, kg_env%nsubsets
+            print *, isubset
+            kg_env%subset_of_mol(isubset) = isubset
+            NULLIFY (kg_env%subset(isubset)%sab_orb)
+            NULLIFY (kg_env%subset(isubset)%task_list)
+         enddo
          !
          DO isubset = 1, kg_env%nsubsets
             ! build the (new) molecular neighborlist of the current subset
