@@ -726,13 +726,6 @@ CONTAINS
                virial%pv_xc = 0.0_dp
             END IF
          END IF
-   
-         ! kin energy functional (check for existence inside)
-         ksmat => ks_matrix(:, 1)
-         call add_ke_func_contribution(qs_env, ksmat, ekin)
-      
-         energy%exc = energy%exc + ekin
-
       END IF ! .NOT. just energy
 
       IF (dft_control%qs_control%ddapc_explicit_potential) THEN
@@ -894,7 +887,13 @@ CONTAINS
                      energy%ee_core + energy%exc_aux_fit + energy%image_charge + &
                      energy%sccs_pol + energy%sccs_mpc + energy%cdft + energy%exc1_aux_fit
 
-      IF (dft_control%apply_embed_pot) energy%total = energy%total + energy%embed_corr
+      IF (dft_control%apply_embed_pot) then
+         energy%total = energy%total + energy%embed_corr
+      end if
+
+
+      print *,"in qs ks build KS matrix dft_control%apply_embed_pot  ", dft_control%apply_embed_pot
+      print *,"energy%total ", energy%total
 
       IF (abnormal_value(energy%total)) &
          CPABORT("KS energy is an abnormal value (NaN/Inf).")

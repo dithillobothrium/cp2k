@@ -191,7 +191,7 @@ CONTAINS
       TYPE(qs_rho_type), POINTER                         :: rho
       TYPE(section_vals_type), POINTER                   :: as_input, loc_print, loc_section, &
                                                             print_orb
-
+      integer:: nmo_internal
       !--------------------------------------------------------------------------------------------!
 
       as_input => section_vals_get_subs_vals(input, "DFT%PRINT%ACTIVE_SPACE")
@@ -277,7 +277,9 @@ CONTAINS
       CPASSERT(ninactive_alpha >= 0)
       CPASSERT(ninactive_beta >= 0)
       CPASSERT(ntot == ninactive + nactive)
+      print *,"nspins, nepol, ninactive_alpha, ninactive_beta", nspins, nepol, ninactive_alpha, ninactive_beta
       IF (nspins > 1) THEN
+         print *,"ebat"
          CPASSERT(nepol(1) >= ninactive_alpha)
          CPASSERT(nepol(2) >= ninactive_beta)
       END IF
@@ -349,13 +351,15 @@ CONTAINS
          CALL cp_abort(__LOCATION__, "A reference MO set has to be available when determining"// &
                        " the active space orbitals.")
       END IF
-      CALL get_mo_set(mos(1)%mo_set, mo_coeff=fm_ref, nao=nao)
+      CALL get_mo_set(mos(1)%mo_set, mo_coeff=fm_ref, nao=nao, nmo=nmo_internal)
       maxocc = 2.0_dp
       IF (nspins > 1) maxocc = 1.0_dp
       ALLOCATE (active_space_env%mos_active(nspins))
       ALLOCATE (active_space_env%mos_inactive(nspins))
+      print *,"mos(1)%mo_set%use_mo_coeff_b", mos(1)%mo_set%use_mo_coeff_b
       DO ispin = 1, nspins
          nmo = nactive_orb(ispin)
+         print *,"nao, nmo, nmo_internal", nao, nmo, nmo_internal
          NULLIFY (mo_set)
          CALL allocate_mo_set(mo_set, nao, nmo, 0, 0.0_dp, maxocc, 0.0_dp)
          CALL init_mo_set(mo_set, fm_ref=fm_ref, name="Active Space MO")
@@ -448,9 +452,12 @@ CONTAINS
             ALLOCATE (eigenvalues(nmo, nspins))
             eigenvalues = 100000._dp
             CALL get_qs_env(qs_env, matrix_ks=ks_matrix)
-            IF (mos(1)%mo_set%use_mo_coeff_b) THEN
-               CPABORT("Needs MOs in FM format, missing code for DBCSR")
-            ELSE
+!            IF (mos(1)%mo_set%use_mo_coeff_b) THEN
+!               CPABORT("Needs MOs in FM format, missing code for DBCSR")
+!               DO ispin = 1, nspins
+!
+!               end do
+!            ELSE
                DO ispin = 1, nspins
                   CALL get_mo_set(mos(ispin)%mo_set, mo_coeff=fm_ref, nmo=nmo)
                   CALL calculate_subspace_eigenvalues(fm_ref, ks_matrix(ispin)%matrix, &
@@ -466,18 +473,18 @@ CONTAINS
                   ncol = nactive_orb(ispin)
                   CALL cp_fm_to_fm(fm_ref, fm_target, ncol, ninactive_orb(ispin) + 1, 1)
                END DO
-            END IF
+!            END IF
             IF (iw > 0) THEN
                DO ispin = 1, nspins
                   WRITE (iw, '(/,T4,A,I3,T65,A)') "Canonical Orbital Selection for spin", ispin, &
                      "[atomic units]"
                   DO i = 1, ninactive_orb(ispin), 4
                      jm = MIN(3, ninactive_orb(ispin) - i)
-                     WRITE (iw, '(T3,4(F14.6,A5))') (eigenvalues(i + j, 1), " [I]", j=0, jm)
+                     WRITE (iw, '(T3,4(F14.6,A5))') (eigenvalues(i + j, ispin), " [I]", j=0, jm)
                   END DO
                   DO i = ninactive_orb(ispin) + 1, ninactive_orb(ispin) + nactive_orb(ispin), 4
                      jm = MIN(3, ninactive_orb(ispin) + nactive_orb(ispin) - i)
-                     WRITE (iw, '(T3,4(F14.6,A5))') (eigenvalues(i + j, 1), " [A]", j=0, jm)
+                     WRITE (iw, '(T3,4(F14.6,A5))') (eigenvalues(i + j, ispin), " [A]", j=0, jm)
                   END DO
                END DO
             END IF
@@ -667,7 +674,7 @@ CONTAINS
          nn1 = (n1*(n1 + 1))/2
          nn2 = (n2*(n2 + 1))/2
          CALL dbcsr_csr_create(eri_mat, nn1, nn2, 0_int_8, 0, 0, para_env%group)
-         CALL get_mo_set(active_space_env%mos_active(i)%mo_set, nmo=active_space_env%eri%norb)
+         CALL get_mo_set(active_space_env%mos_active(1)%mo_set, nmo=active_space_env%eri%norb)
       END DO
 
       SELECT CASE (eri_method)
@@ -966,7 +973,7 @@ CONTAINS
       TYPE(qs_kind_type), DIMENSION(:), POINTER          :: qs_kind_set
       TYPE(qs_ks_env_type), POINTER                      :: ks_env
       TYPE(task_list_type), POINTER                      :: task_list_sub
-
+       
       CALL timeset(routineN, handle)
 
       ! print levels
@@ -1007,6 +1014,11 @@ CONTAINS
 
       relative_cutoff_old = dft_control%qs_control%relative_cutoff
       dft_control%qs_control%relative_cutoff = eri_env%eri_gpw%rel_cutoff*0.5_dp
+
+      print *, "dft cutoff", cutoff_old
+      print *, "eri cutoff", dft_control%qs_control%cutoff
+      print *, "dft rel_cutoff", relative_cutoff_old
+      print *, "eri rel_cutoff", dft_control%qs_control%relative_cutoff
 
       ! Generate the appropriate  pw_env
       NULLIFY (pw_env_sub)
@@ -1160,7 +1172,7 @@ CONTAINS
                            END IF
                            wfn_r%pw%cr3d = rho_r%pw%cr3d*wfn3%pw%cr3d*wfn4%pw%cr3d
                            erint = pw_integrate_function(wfn_r%pw)
-                           IF (erint > eri_env%eps_integral) THEN
+                           IF (abs(erint) > eri_env%eps_integral) THEN
                               intcount = intcount + 1
                               IF (print2 .AND. iw > 0) THEN
                                  WRITE (iw, "(T4,'ERI_GPW|',T20,2I4,' [',I1,']',2I4,' [',I1,']',T58,G20.14)") &
@@ -1807,6 +1819,7 @@ CONTAINS
       ! let's also calculate Vxc
       qs_env%requires_matrix_vxc = .TRUE.
 
+      print *,"active space CALL qs_ks_update_qs_env(qs_env)"
       ! new density and Kohn-Sham matrix
       CALL qs_ks_update_qs_env(qs_env)
 
