@@ -71,7 +71,7 @@ MODULE qs_active_space_methods
                                               pw_env_type
    USE pw_grid_types,                   ONLY: pw_grid_type
    USE pw_methods,                      ONLY: pw_integrate_function,&
-                                              pw_transfer
+                                              pw_transfer,pw_scale
    USE pw_poisson_methods,              ONLY: pw_poisson_rebuild,&
                                               pw_poisson_solve
    USE pw_poisson_types,                ONLY: ANALYTIC0D,&
@@ -191,7 +191,7 @@ CONTAINS
       TYPE(qs_rho_type), POINTER                         :: rho
       TYPE(section_vals_type), POINTER                   :: as_input, loc_print, loc_section, &
                                                             print_orb
-      integer:: nmo_internal
+      integer:: nmo_internal,ii
       !--------------------------------------------------------------------------------------------!
 
       as_input => section_vals_get_subs_vals(input, "DFT%PRINT%ACTIVE_SPACE")
@@ -458,8 +458,14 @@ CONTAINS
 !
 !               end do
 !            ELSE
+
+             !open (unit = 666, file = "eigv.dat") 
+             !open (unit = 667, file = "mo_coeff.dat") 
                DO ispin = 1, nspins
                   CALL get_mo_set(mos(ispin)%mo_set, mo_coeff=fm_ref, nmo=nmo)
+                  !do ii=lbound(fm_ref % local_data,1), ubound(fm_ref % local_data,1)
+                     !write (667, *) fm_ref % local_data(ii, lbound(fm_ref % local_data,2):ubound(fm_ref % local_data,2))
+                  !end do
                   CALL calculate_subspace_eigenvalues(fm_ref, ks_matrix(ispin)%matrix, &
                                                       evals_arg=eigenvalues(:, ispin), do_rotation=.TRUE.)
                   ! copy inactive orbitals
@@ -471,8 +477,17 @@ CONTAINS
                   mo_set => active_space_env%mos_active(ispin)%mo_set
                   CALL get_mo_set(mo_set, mo_coeff=fm_target)
                   ncol = nactive_orb(ispin)
+                  print *, "ninactive_orb(ispin)", ninactive_orb(ispin)
+                  
+                  !do ii=lbound(fm_ref % local_data,1), ubound(fm_ref % local_data,1)
+                     !write (666, *) fm_ref % local_data(ii, lbound(fm_ref % local_data,2):ubound(fm_ref % local_data,2))
+                  !end do
+                  
                   CALL cp_fm_to_fm(fm_ref, fm_target, ncol, ninactive_orb(ispin) + 1, 1)
+
                END DO
+             !close(666)
+             !close(667)
 !            END IF
             IF (iw > 0) THEN
                DO ispin = 1, nspins
@@ -1107,6 +1122,7 @@ CONTAINS
       rho_r%pw%cr3d = 0.0D0
       CALL pw_transfer(rho_r%pw, rho_g%pw)
       dvol = rho_r%pw%pw_grid%dvol
+      print *,"dvol ", dvol
 
       ! calculate the integrals
       intcount = 0
@@ -1142,8 +1158,10 @@ CONTAINS
                CALL pw_transfer(rho_r%pw, rho_g%pw)
                CALL pw_poisson_solve(poisson_env, rho_g%pw, pair_int, pot_g%pw)
                ! screening using pair_int
-               IF (pair_int < eri_env%eps_integral) CYCLE
+               IF (abs(pair_int) < eri_env%eps_integral) CYCLE
+               
                CALL pw_transfer(pot_g%pw, rho_r%pw)
+               
                !
                IF (eri_env%method == eri_method_gpw_ht) THEN
                   CPABORT("Not available")
@@ -1592,9 +1610,10 @@ CONTAINS
                                                             irange(2), irptr, is, nelec, nindex, &
                                                             norb, nspins
       REAL(KIND=dp)                                      :: eeri, eref, erint, esub, mval
-      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :)        :: ks_mat, ks_ref, p_mat
+      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :)        :: ks_mat, ks_ref, p_mat, x_mat
       TYPE(cp_fm_type), POINTER                          :: matrix
       TYPE(dbcsr_csr_type), POINTER                      :: eri
+      integer :: ii
 
       eref = active_space_env%energy_ref
       nspins = active_space_env%nspins
@@ -1605,10 +1624,11 @@ CONTAINS
          ! Loop over ERI, calculate subspace HF energy and Fock matrix
          !
          ! replicate KS, Core, and P matrices
-         ALLOCATE (ks_mat(norb, norb), ks_ref(norb, norb), p_mat(norb, norb))
+         ALLOCATE (ks_mat(norb, norb), ks_ref(norb, norb), p_mat(norb, norb), x_mat(norb, norb))
          ks_mat = 0.0_dp
          ks_ref = 0.0_dp
          p_mat = 0.0_dp
+         x_mat= 0.0_dp
          DO i1 = 1, norb
             DO i2 = i1, norb
                matrix => active_space_env%p_ref(1)%matrix
@@ -1626,9 +1646,14 @@ CONTAINS
          eri => active_space_env%eri%eri(1)%csr_mat
          nindex = (norb*(norb + 1))/2
          irange = get_irange_csr(nindex, eri%mp_group)
-         DO i1 = 1, norb
-            DO i2 = i1, norb
-               i12 = csr_idx_to_combined(i1, i2, norb)
+         print *, "size(eri%rowptr_local) ", size(eri%rowptr_local)
+         print *, "irange", irange
+         
+         do i12 = 1, eri % nrows_local
+            CALL csr_idx_from_combined(i12, norb, i1, i2)
+         !DO i1 = 1, norb
+            !DO i2 = i1, norb
+               !i12 = csr_idx_to_combined(i1, i2, norb)
                IF (i12 >= irange(1) .AND. i12 <= irange(2)) THEN
                   i12l = i12 - irange(1) + 1
                   irptr = eri%rowptr_local(i12l) - 1
@@ -1650,29 +1675,57 @@ CONTAINS
                      ! Exchange
                      erint = -0.5_dp*erint
                      ks_ref(i1, i3) = ks_ref(i1, i3) + erint*p_mat(i2, i4)
+                     x_mat(i1, i3) = x_mat(i1, i3) + erint*p_mat(i2, i4)
                      IF (i1 /= i2) THEN
                         ks_ref(i2, i3) = ks_ref(i2, i3) + erint*p_mat(i1, i4)
+                        x_mat(i2, i3) = x_mat(i2, i3) + erint*p_mat(i1, i4)
                      END IF
                      IF (i3 /= i4) THEN
                         ks_ref(i1, i4) = ks_ref(i1, i4) + erint*p_mat(i2, i3)
+                        x_mat(i1, i4) = x_mat(i1, i4) + erint*p_mat(i2, i3)
                      END IF
                      IF (i1 /= i2 .AND. i3 /= i4) THEN
                         ks_ref(i2, i4) = ks_ref(i2, i4) + erint*p_mat(i1, i3)
+                        x_mat(i2, i4) = x_mat(i2, i4) + erint*p_mat(i1, i3)
                      END IF
                   END DO
                END IF
-            END DO
-         END DO
+            !END DO
+         !END DO
+
+         end do
+
          !
          DO i1 = 1, norb
             DO i2 = i1, norb
-               ks_ref(i1, i2) = ks_ref(i2, i1)
+               ks_ref(i2, i1) = ks_ref(i1, i2)
             END DO
          END DO
          CALL mp_sum(ks_ref, eri%mp_group)
          !
          eeri = 0.5_dp*SUM(ks_ref*p_mat)
+         print *, "eeri", eeri
+         print *, "0.5*SUM(x_mat*p_mat)",0.5*SUM(x_mat*p_mat)
+         print *, "SUM(ks_mat(1:norb, 1:norb)*p_mat(1:norb, 1:norb))", SUM(ks_mat(1:norb, 1:norb)*p_mat(1:norb, 1:norb))
+         print *, "SUM(ks_mat*p_mat)",SUM(ks_mat*p_mat)
          esub = eref - SUM(ks_mat(1:norb, 1:norb)*p_mat(1:norb, 1:norb)) + eeri
+         !esub = eref - SUM(ks_mat(1:norb, 1:norb)*p_mat(1:norb, 1:norb))
+         print *, "esub, eref", esub, eref
+             !open (unit = 666, file = "ks_mat.dat") 
+                  !do ii=lbound(ks_mat ,1), ubound(ks_mat,1)
+                     !write (666, *) ks_mat (ii, lbound(ks_mat,2):ubound(ks_mat,2))
+                  !end do
+             !close(666)
+             !open (unit = 666, file = "dm_mat.dat") 
+                  !do ii=lbound(p_mat ,1), ubound(p_mat,1)
+                     !write (666, *) p_mat (ii, lbound(p_mat,2):ubound(p_mat,2))
+                  !end do
+             !close(666)
+             !open (unit = 666, file = "ks_ref.dat") 
+                  !do ii=lbound(ks_ref ,1), ubound(ks_ref,1)
+                     !write (666, *) ks_ref (ii, lbound(ks_ref,2):ubound(ks_ref,2))
+                  !end do
+             !close(666)
          ks_mat(1:norb, 1:norb) = ks_mat(1:norb, 1:norb) - ks_ref(1:norb, 1:norb)
          !
          active_space_env%energy_inactive = esub

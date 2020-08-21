@@ -346,9 +346,11 @@ CONTAINS
          irange = get_irange_csr(nindex, eri%mp_group)
          ALLOCATE (erival(nindex), colind(nindex))
 
-         DO i1 = 1, norb
-            DO i2 = i1, norb
-               i12 = csr_idx_to_combined(i1, i2, norb)
+         do i12 = 1, eri % nrows_local
+         !DO i1 = 1, norb
+            !DO i2 = i1, norb
+               !i12 = csr_idx_to_combined(i1, i2, norb)
+            CALL csr_idx_from_combined(i12, norb, i1, i2)
 
                IF (i12 >= irange(1) .AND. i12 <= irange(2)) THEN
                   i12l = i12 - irange(1) + 1
@@ -376,9 +378,11 @@ CONTAINS
                   IF (.NOT. fobj%func(i1, i2, i3, i4, erint)) RETURN
                END DO
 
-            END DO
-         END DO
-      END ASSOCIATE
+            !END DO
+         !END DO
+     end do
+      
+     END ASSOCIATE
    END SUBROUTINE eri_type_eri_foreach
 
 END MODULE qs_active_space_types
